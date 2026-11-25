@@ -1,0 +1,33 @@
+# Maxfiy kalitlar va muhit o'zgaruvchilari
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Ma'lumotlar bazasi va zaxira nusxalar
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.bak
+*.backup
+
+# Vaqtinchalik yuklashlar
+downloads/
+
+# Python virtual muhiti va keshlar
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.pytest_cache/
+
+# Tizim va muharrir fayllari
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
