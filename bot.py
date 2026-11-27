@@ -89,6 +89,36 @@ def _trim_memory_caches():
             search_results_cache.pop(k, None)
 
 
+def _save_track_token(token: str, query: str):
+    """Tugma tokenini xotiraga va fonda SQLite bazaga saqlaydi (restartdan keyin ham ishlaydi)."""
+    _trim_memory_caches()
+    track_search_cache[token] = query
+    asyncio.create_task(db.save_button_token(token, "full_track", query))
+
+
+def _save_search_session(session_id: str, tracks: list[dict]):
+    _trim_memory_caches()
+    search_results_cache[session_id] = tracks
+    asyncio.create_task(db.save_button_token(session_id, "search_list", tracks))
+
+
+async def _safe_cb_answer(callback: CallbackQuery, text: str | None = None, show_alert: bool = False):
+    try:
+        await callback.answer(text=text, show_alert=show_alert)
+    except Exception:
+        pass
+
+
+@dp.error()
+async def _global_error_guard(event: types.ErrorEvent):
+    """Eskirgan callback_query xatolarini jim o'tkazib yuboradi, qolganlarini qayd etadi."""
+    err_str = str(event.exception).lower()
+    if "query is too old" in err_str or "message is not modified" in err_str:
+        return True
+    print(f"[!] Global handler xato: {event.exception}")
+    return True
+
+
 # ─── FOYDALANUVCHINI TEKSHIRISH VA BAZAGA YOZISH ───────────────
 
 async def pre_process_user(message: types.Message, ref_code: str | None = None) -> bool:
@@ -126,20 +156,19 @@ async def pre_process_user(message: types.Message, ref_code: str | None = None) 
 
 
 async def pre_process_callback(callback: CallbackQuery) -> bool:
-    """Callback so'rovlari uchun ban va texnik rejim tekshiruvi."""
+    """Callback so'rovlari uchun 0ms xotiradan ban va texnik rejim tekshiruvi."""
     user = callback.from_user
     if not user:
         return False
     if is_admin(user.id, user.username):
         return True
 
-    db_user = await db.get_user(user.id)
-    if db_user and db_user.get("is_banned"):
-        await callback.answer("🚫 Siz botdan foydalanishdan cheklangansiz.", show_alert=True)
+    if db.is_user_banned_fast(user.id):
+        await _safe_cb_answer(callback, "🚫 Siz botdan foydalanishdan cheklangansiz.", show_alert=True)
         return False
 
     if db.get_bool_setting("maintenance_mode", False):
-        await callback.answer("🛠 Botda texnik ishlar olib borilmoqda. Birozdan so'ng urinib ko'ring!", show_alert=True)
+        await _safe_cb_answer(callback, "🛠 Botda texnik ishlar olib borilmoqda. Birozdan so'ng urinib ko'ring!", show_alert=True)
         return False
 
     return True
@@ -376,9 +405,8 @@ async def _process_video_link(message: types.Message, url: str, platform: str):
                 c_title = cached_audio.get("title") or ""
                 c_perf = cached_audio.get("performer") or ""
                 if c_title and c_perf and c_perf != "@taronaizlauzbot":
-                    _trim_memory_caches()
                     token = uuid.uuid4().hex[:10]
-                    track_search_cache[token] = f"{c_perf} - {c_title}"
+                    _save_track_token(token, f"{c_perf} - {c_title}")
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(
                             text="🎧 To'liq musiqani yuklash (Full MP3)",
@@ -560,9 +588,8 @@ async def _process_video_link(message: types.Message, url: str, platform: str):
         # 3. Tugmani tayyorlash (BITTA TUGMA — faqat audio ostida!)
         keyboard = None
         if music.found:
-            _trim_memory_caches()
             token = uuid.uuid4().hex[:10]
-            track_search_cache[token] = f"{music.artist} - {music.title}"
+            _save_track_token(token, f"{music.artist} - {music.title}")
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[[
                     InlineKeyboardButton(
@@ -697,10 +724,9 @@ async def handle_media_file(message: types.Message):
                 )
                 return
 
-            _trim_memory_caches()
             search_query = f"{music.artist} - {music.title}"
             token = uuid.uuid4().hex[:10]
-            track_search_cache[token] = search_query
+            _save_track_token(token, search_query)
 
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[[
@@ -756,12 +782,19 @@ async def handle_download_full(callback: CallbackQuery):
 
     token = callback.data.split(":", 1)[1]
     query = track_search_cache.get(token)
+    if not query:
+        query = await db.get_button_token(token, "full_track")
+        if query:
+            track_search_cache[token] = query
 
     if not query:
-        await callback.answer(
-            "⚠️ So'rov eskirgan. Iltimos, linkni qayta yuboring.", show_alert=True
+        await _safe_cb_answer(
+            callback, "⚠️ So'rov eskirgan. Iltimos, linkni qayta yuboring.", show_alert=True
         )
         return
+
+    # Darhol javob qaytaramiz — tugmadagi aylanish o'sha zahoti to'xtaydi!
+    await _safe_cb_answer(callback, "⚡ Tayyorlanmoqda...")
 
     cache_enabled = db.get_bool_setting("cache_enabled", True)
 
@@ -775,7 +808,6 @@ async def handle_download_full(callback: CallbackQuery):
                 caption = format_caption_with_footer(
                     f"🎧 <b>{_esc(artist)} — {_esc(title)}</b> (To'liq versiya)\n\n🤖 @taronaizlauzbot"
                 )
-                await callback.answer("⚡ Tayyor!")
                 await callback.message.reply_audio(
                     audio=cached_full["file_id"],
                     title=title,
@@ -789,8 +821,6 @@ async def handle_download_full(callback: CallbackQuery):
                 return
             except Exception:
                 pass
-
-    await callback.answer("⏳ To'liq musiqa yuklanmoqda...")
 
     status_msg = await callback.message.reply(
         f"⏳ <b>{_esc(query)}</b> — to'liq trek yuklanmoqda...",
@@ -900,9 +930,8 @@ async def handle_song_search(message: types.Message):
             )
             return
 
-        _trim_memory_caches()
         session_id = uuid.uuid4().hex[:8]
-        search_results_cache[session_id] = tracks
+        _save_search_session(session_id, tracks)
 
         text = f"🔍 <b>\"{_esc(query)}\"</b> bo'yicha topilgan taronalar:\n\n"
         button_row = []
@@ -946,14 +975,23 @@ async def handle_pick_track(callback: CallbackQuery):
     track_idx = int(parts[2])
 
     tracks = search_results_cache.get(session_id)
+    if not tracks:
+        tracks = await db.get_button_token(session_id, "search_list")
+        if tracks:
+            search_results_cache[session_id] = tracks
+
     if not tracks or track_idx >= len(tracks):
-        await callback.answer(
+        await _safe_cb_answer(
+            callback,
             "⚠️ Qidiruv natijasi eskirgan. Qaytadan qo'shiq nomini yozing.",
             show_alert=True,
         )
         return
 
     track = tracks[track_idx]
+    # Darhol javob qaytaramiz — tugma kutib turmaydi!
+    await _safe_cb_answer(callback, f"⚡ {track['title'][:28]}...")
+
     cache_enabled = db.get_bool_setting("cache_enabled", True)
 
     if cache_enabled:
@@ -967,7 +1005,6 @@ async def handle_pick_track(callback: CallbackQuery):
                 caption = format_caption_with_footer(
                     f"🎵 <b>{_esc(artist)} — {_esc(title)}</b>\n\n🤖 @taronaizlauzbot orqali yuklab olindi"
                 )
-                await callback.answer("⚡ Tayyor!")
                 await callback.message.reply_audio(
                     audio=cached_track["file_id"],
                     title=title,
@@ -981,8 +1018,6 @@ async def handle_pick_track(callback: CallbackQuery):
                 return
             except Exception:
                 pass
-
-    await callback.answer(f"⏳ {track['title'][:30]} yuklanmoqda...")
 
     status_msg = await callback.message.reply(
         f"⏳ <b>{_esc(track['title'])}</b> — MP3 yuklanmoqda...",
@@ -1057,6 +1092,32 @@ def _clean_downloads_dir():
             pass
 
 
+async def _self_keepalive_loop(ping_url: str):
+    """
+    Alwaysdata 30 daqiqalik idle uyqusini oldini olish uchun har 12 daqiqada
+    tashqi HTTPS manziliga ping yuborib, botni 24/7 uyg'oq (0.001s javob) ushlab turadi!
+    """
+    while True:
+        await asyncio.sleep(12 * 60)
+        try:
+            session = await Downloader.get_http_session()
+            async with session.get(ping_url, headers={"User-Agent": "TaronaKeepAlive/1.0"}) as resp:
+                await resp.read()
+        except Exception:
+            pass
+
+
+async def _background_heavy_warmup():
+    """Port ochilganidan keyin og'ir modullarni (yt_dlp va Shazam) fonda xotiraga yuklaydi."""
+    await asyncio.sleep(0.5)
+    try:
+        from downloader import _get_yt_dlp
+        await asyncio.to_thread(_get_yt_dlp)
+        await recognizer.warmup()
+    except Exception:
+        pass
+
+
 async def _run_webhook_server():
     """Alwaysdata (Web -> Sites -> User program) uchun 24/7 aiohttp Webhook serveri."""
     from aiohttp import web
@@ -1075,6 +1136,7 @@ async def _run_webhook_server():
     handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
+        handle_in_background=True,
         secret_token=WEBHOOK_SECRET or None,
     )
     handler.register(app, path=WEBHOOK_PATH)
@@ -1098,9 +1160,13 @@ async def _run_webhook_server():
     print(f"[*] Telegram Webhook ulandi: {webhook_url}")
     print("=" * 54)
 
+    keepalive_task = asyncio.create_task(_self_keepalive_loop(f"{WEBHOOK_HOST}/health"))
+    asyncio.create_task(_background_heavy_warmup())
+
     try:
         await asyncio.Event().wait()
     finally:
+        keepalive_task.cancel()
         await runner.cleanup()
         await Downloader.close()
         await db.close()

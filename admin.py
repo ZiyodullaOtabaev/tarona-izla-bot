@@ -47,6 +47,7 @@ from admin_utils import (
     get_subscription_keyboard,
     make_bar,
     parse_inline_buttons,
+    safe_answer,
     safe_edit,
 )
 from config import (
@@ -371,10 +372,10 @@ async def cmd_admin(message: Message, state: FSMContext):
 async def cb_admin_menu(callback: CallbackQuery, state: FSMContext):
     if not check_admin_access(callback):
         return
+    await safe_answer(callback)
     await state.clear()
     text, kb = await _render_main_dashboard(callback.from_user.id, callback.from_user.first_name)
     await safe_edit(callback.message, text, kb)
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data == "admin_close")
@@ -1668,30 +1669,30 @@ async def _render_user_list(title: str, users: list[dict[str, Any]], show_dl: bo
 async def cb_usr_top(callback: CallbackQuery):
     if not check_admin_access(callback):
         return
+    await safe_answer(callback)
     users = await db.get_top_users(10)
     text, kb = await _render_user_list("🏆 Top-10 Eng Faol Foydalanuvchilar", users, show_dl=True)
     await safe_edit(callback.message, text, kb)
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data == "usr_recent")
 async def cb_usr_recent(callback: CallbackQuery):
     if not check_admin_access(callback):
         return
+    await safe_answer(callback)
     users = await db.get_recent_users(10)
     text, kb = await _render_user_list("🆕 Oxirgi 10 Qo'shilgan Foydalanuvchi", users, show_dl=False)
     await safe_edit(callback.message, text, kb)
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data == "usr_banned")
 async def cb_usr_banned(callback: CallbackQuery):
     if not check_admin_access(callback):
         return
+    await safe_answer(callback)
     users = await db.get_banned_users(15)
     text, kb = await _render_user_list("🚫 Ban Qilingan Foydalanuvchilar", users, show_dl=False)
     await safe_edit(callback.message, text, kb)
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data.startswith("usr_view:"))
@@ -1702,10 +1703,10 @@ async def cb_usr_view(callback: CallbackQuery, state: FSMContext):
     uid = int(callback.data.split(":", 1)[1])
     res = await _render_user_card(uid)
     if not res:
-        await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
+        await safe_answer(callback, "Foydalanuvchi topilmadi", show_alert=True)
         return
+    await safe_answer(callback)
     await safe_edit(callback.message, res[0], res[1])
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data.startswith("usr_dm:"))
@@ -1830,12 +1831,25 @@ async def cb_usr_unban(callback: CallbackQuery):
 #             6. REKLAMA / UTM HAVOLALARI (DEEP-LINK)
 # ═══════════════════════════════════════════════════════════════
 
-async def _render_refs_panel(bot: Bot) -> tuple[str, InlineKeyboardMarkup]:
+_cached_bot_username: str | None = None
+
+
+async def _get_bot_uname(bot: Bot) -> str:
+    global _cached_bot_username
+    if _cached_bot_username:
+        return _cached_bot_username
     try:
         me = await bot.get_me()
-        bot_uname = me.username or BOT_USERNAME
+        if me.username:
+            _cached_bot_username = me.username
+            return _cached_bot_username
     except Exception:
-        bot_uname = BOT_USERNAME
+        pass
+    return BOT_USERNAME
+
+
+async def _render_refs_panel(bot: Bot) -> tuple[str, InlineKeyboardMarkup]:
+    bot_uname = await _get_bot_uname(bot)
 
     refs = await db.get_referrals_with_stats()
     lines = [
@@ -1872,10 +1886,10 @@ async def _render_refs_panel(bot: Bot) -> tuple[str, InlineKeyboardMarkup]:
 async def cb_admin_refs(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if not check_admin_access(callback):
         return
+    await safe_answer(callback)
     await state.clear()
     text, kb = await _render_refs_panel(bot)
     await safe_edit(callback.message, text, kb)
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data == "ref_new")

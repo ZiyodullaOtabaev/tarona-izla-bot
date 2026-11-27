@@ -15,7 +15,7 @@ from typing import Any
 from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import DB_PATH, DOWNLOAD_DIR, PRIMARY_ADMIN_ID, is_admin, is_owner
 from database import db
@@ -47,6 +47,20 @@ def make_bar(value: int, max_val: int, width: int = 8) -> str:
         return "░" * width
     filled = max(1, min(width, round((value / max_val) * width)))
     return "█" * filled + "░" * (width - filled)
+
+
+async def safe_answer(
+    callback: CallbackQuery,
+    text: str | None = None,
+    show_alert: bool = False,
+):
+    """Muddati o'tgan callback_query xatolarini yutib, tugmaga darhol javob qaytaradi."""
+    try:
+        await callback.answer(text=text, show_alert=show_alert)
+    except TelegramBadRequest:
+        pass
+    except Exception:
+        pass
 
 
 async def safe_edit(

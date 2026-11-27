@@ -25,9 +25,19 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-import yt_dlp
 
 from config import FFMPEG_PATH, LOW_RAM_MODE, MAX_TELEGRAM_FILE_SIZE
+
+_yt_dlp_mod = None
+
+
+def _get_yt_dlp():
+    """yt_dlp ni faqat kerak bo'lganda xotiraga yuklaydi (sovuq startni 10x tezlashtiradi)."""
+    global _yt_dlp_mod
+    if _yt_dlp_mod is None:
+        import yt_dlp as _ydl
+        _yt_dlp_mod = _ydl
+    return _yt_dlp_mod
 
 # Qidiruv so'rovlari keshi: query -> (results, timestamp)
 search_memory_cache: dict[str, tuple[list[dict], float]] = {}
@@ -64,15 +74,16 @@ class _YdlPool:
 
     def __init__(self, opts_factory, max_size: int = 4):
         self._opts_factory = opts_factory
-        self._pool: queue.LifoQueue[yt_dlp.YoutubeDL] = queue.LifoQueue(maxsize=max_size)
+        self._pool: queue.LifoQueue[Any] = queue.LifoQueue(maxsize=max_size)
 
-    def acquire(self) -> yt_dlp.YoutubeDL:
+    def acquire(self) -> Any:
         try:
             return self._pool.get_nowait()
         except queue.Empty:
-            return yt_dlp.YoutubeDL(self._opts_factory())
+            ydl_mod = _get_yt_dlp()
+            return ydl_mod.YoutubeDL(self._opts_factory())
 
-    def release(self, ydl: yt_dlp.YoutubeDL):
+    def release(self, ydl: Any):
         try:
             self._pool.put_nowait(ydl)
         except queue.Full:
@@ -546,7 +557,8 @@ class Downloader:
         })
 
         def _dl():
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl_mod = _get_yt_dlp()
+            with ydl_mod.YoutubeDL(opts) as ydl:
                 ydl.download([url])
 
         try:

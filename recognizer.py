@@ -1,14 +1,10 @@
 """
-Musiqa aniqlash moduli (ShazamIO — tekin, API key kerak emas).
-
-ShazamIO Shazam'ning ichki API'sini ishlatadi.
-Bazada millionlab qo'shiqlar bor, shu jumladan o'zbek qo'shiqlar ham.
+Musiqa aniqlash moduli (ShazamIO — Lazy-load bilan tezkor start).
 """
 
-from dataclasses import dataclass, field
+import asyncio
+from dataclasses import dataclass
 from pathlib import Path
-
-from shazamio import Shazam
 
 
 @dataclass
@@ -26,35 +22,33 @@ class MusicResult:
 
 
 class MusicRecognizer:
-    """Shazam asosidagi musiqa aniqlagich."""
+    """Shazam asosidagi musiqa aniqlagich (startni sekinlashtirmaslik uchun lazy-import)."""
 
     def __init__(self):
-        self.shazam = Shazam()
+        self._shazam = None
+
+    def _get_shazam(self):
+        if self._shazam is None:
+            from shazamio import Shazam
+            self._shazam = Shazam()
+        return self._shazam
+
+    async def warmup(self):
+        """Fonda Shazam kutubxonasini oldindan xotiraga yuklab qo'yish."""
+        await asyncio.to_thread(self._get_shazam)
 
     async def recognize(self, audio_path: Path | str) -> MusicResult:
-        """
-        Audio fayldan musiqani aniqlaydi.
-
-        Args:
-            audio_path: Audio fayl yo'li (.mp3, .m4a, .wav va boshqalar)
-
-        Returns:
-            MusicResult: Aniqlangan qo'shiq ma'lumotlari
-        """
         try:
-            result = await self.shazam.recognize(str(audio_path))
+            shazam = await asyncio.to_thread(self._get_shazam)
+            result = await shazam.recognize(str(audio_path))
 
-            # Agar natija bo'lmasa
             if not result or "track" not in result:
                 return MusicResult(found=False)
 
             track = result["track"]
-
-            # Asosiy ma'lumotlar
             title = track.get("title", "Noma'lum")
             artist = track.get("subtitle", "Noma'lum")
 
-            # Album, yil va label — sections ichidan
             album = ""
             year = ""
             label = ""
@@ -70,11 +64,8 @@ class MusicRecognizer:
                         elif meta_title == "Label":
                             label = meta_text
 
-            # Cover rasm
             images = track.get("images", {})
             cover_url = images.get("coverart", images.get("background", ""))
-
-            # Shazam havolasi
             shazam_url = track.get("url", "")
 
             return MusicResult(

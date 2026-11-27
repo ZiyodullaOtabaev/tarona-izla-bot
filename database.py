@@ -9,6 +9,7 @@ Optimizatsiyalar:
 """
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any
@@ -25,6 +26,7 @@ class Database:
         self._lock = asyncio.Lock()
         self._settings_cache: dict[str, str] = dict(DEFAULT_SETTINGS)
         self._active_channels_cache: list[dict[str, Any]] | None = None
+        self._banned_ids: set[int] = set()
 
     @asynccontextmanager
     async def _session(self):
@@ -212,6 +214,17 @@ class Database:
                 )
             """)
 
+            # 11. Tugma tokenlari (restartdan keyin ham tugmalar ishlashi uchun)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS button_tokens (
+                    token TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (token, kind)
+                )
+            """)
+
             # Indekslar
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_created ON downloads(created_at)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_user ON downloads(user_id)")
@@ -235,6 +248,9 @@ class Database:
                     WHERE media_type = 'audio' AND (performer = '@taronaizlauzbot' OR performer = '' OR performer IS NULL)
                 )
             """)
+
+            b_cur = await conn.execute("SELECT user_id FROM users WHERE is_banned = 1")
+            self._banned_ids = {int(r[0]) for r in await b_cur.fetchall()}
 
             await conn.commit()
 
@@ -367,6 +383,10 @@ class Database:
             )
             return [dict(r) for r in await cursor.fetchall()]
 
+    def is_user_banned_fast(self, user_id: int) -> bool:
+        """0ms xotiradan ban tekshiruvi (callback tugmalar uchun)."""
+        return user_id in self._banned_ids
+
     async def set_user_ban(self, user_id: int, is_banned: bool, reason: str | None = None):
         async with self._session() as conn:
             await conn.execute(
@@ -374,6 +394,42 @@ class Database:
                 (1 if is_banned else 0, reason if is_banned else None, user_id),
             )
             await conn.commit()
+        if is_banned:
+            self._banned_ids.add(int(user_id))
+        else:
+            self._banned_ids.discard(int(user_id))
+
+    async def save_button_token(self, token: str, kind: str, payload: Any):
+        raw = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        async with self._session() as conn:
+            await conn.execute(
+                "INSERT OR REPLACE INTO button_tokens (token, kind, payload) VALUES (?, ?, ?)",
+                (token, kind, raw),
+            )
+            await conn.execute(
+                """
+                DELETE FROM button_tokens
+                WHERE rowid NOT IN (SELECT rowid FROM button_tokens ORDER BY rowid DESC LIMIT 2000)
+                """
+            )
+            await conn.commit()
+
+    async def get_button_token(self, token: str, kind: str) -> Any | None:
+        async with self._session() as conn:
+            cursor = await conn.execute(
+                "SELECT payload FROM button_tokens WHERE token = ? AND kind = ?",
+                (token, kind),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            raw = row[0]
+            if kind == "search_list":
+                try:
+                    return json.loads(raw)
+                except Exception:
+                    return None
+            return raw
 
     async def set_user_active(self, user_id: int, is_active: bool):
         async with self._session() as conn:
@@ -469,38 +525,38 @@ class Database:
         since_30d = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
         async with self._session() as conn:
-            total_users = (await (await conn.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
-            today_users = (
-                await (await conn.execute("SELECT COUNT(*) FROM users WHERE date(joined_at) = date(?)", (today_str,))).fetchone()
-            )[0]
-            yesterday_users = (
-                await (await conn.execute("SELECT COUNT(*) FROM users WHERE date(joined_at) = date(?)", (yesterday_date,))).fetchone()
-            )[0]
-            active_24h = (
-                await (await conn.execute("SELECT COUNT(*) FROM users WHERE last_active >= ?", (since_24h,))).fetchone()
-            )[0]
-            active_7d = (
-                await (await conn.execute("SELECT COUNT(*) FROM users WHERE last_active >= ?", (since_7d,))).fetchone()
-            )[0]
-            active_30d = (
-                await (await conn.execute("SELECT COUNT(*) FROM users WHERE last_active >= ?", (since_30d,))).fetchone()
-            )[0]
-            dead_users = (await (await conn.execute("SELECT COUNT(*) FROM users WHERE is_active = 0")).fetchone())[0]
-            banned_users = (await (await conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")).fetchone())[0]
+            u_row = await (
+                await conn.execute(
+                    """
+                    SELECT
+                        COUNT(*),
+                        COALESCE(SUM(CASE WHEN date(joined_at) = date(?) THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN date(joined_at) = date(?) THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN last_active >= ? THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN last_active >= ? THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN last_active >= ? THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN is_banned = 1 THEN 1 ELSE 0 END), 0)
+                    FROM users
+                    """,
+                    (today_str, yesterday_date, since_24h, since_7d, since_30d),
+                )
+            ).fetchone()
 
-            total_downloads = (await (await conn.execute("SELECT COUNT(*) FROM downloads")).fetchone())[0]
-            today_downloads = (
-                await (await conn.execute("SELECT COUNT(*) FROM downloads WHERE date(created_at) = date(?)", (today_str,))).fetchone()
-            )[0]
-            yesterday_downloads = (
-                await (await conn.execute("SELECT COUNT(*) FROM downloads WHERE date(created_at) = date(?)", (yesterday_date,))).fetchone()
-            )[0]
-            week_downloads = (
-                await (await conn.execute("SELECT COUNT(*) FROM downloads WHERE created_at >= ?", (since_7d,))).fetchone()
-            )[0]
-            cache_hits = (
-                await (await conn.execute("SELECT COUNT(*) FROM downloads WHERE from_cache = 1")).fetchone()
-            )[0]
+            d_row = await (
+                await conn.execute(
+                    """
+                    SELECT
+                        COUNT(*),
+                        COALESCE(SUM(CASE WHEN date(created_at) = date(?) THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN date(created_at) = date(?) THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN from_cache = 1 THEN 1 ELSE 0 END), 0)
+                    FROM downloads
+                    """,
+                    (today_str, yesterday_date, since_7d),
+                )
+            ).fetchone()
 
             platforms_raw = await (
                 await conn.execute("SELECT platform, COUNT(*) FROM downloads GROUP BY platform")
@@ -508,19 +564,19 @@ class Database:
             platform_stats = {row[0]: row[1] for row in platforms_raw}
 
             return {
-                "total_users": total_users,
-                "today_users": today_users,
-                "yesterday_users": yesterday_users,
-                "active_24h": active_24h,
-                "active_7d": active_7d,
-                "active_30d": active_30d,
-                "dead_users": dead_users,
-                "banned_users": banned_users,
-                "total_downloads": total_downloads,
-                "today_downloads": today_downloads,
-                "yesterday_downloads": yesterday_downloads,
-                "week_downloads": week_downloads,
-                "cache_hits": cache_hits,
+                "total_users": u_row[0],
+                "today_users": u_row[1],
+                "yesterday_users": u_row[2],
+                "active_24h": u_row[3],
+                "active_7d": u_row[4],
+                "active_30d": u_row[5],
+                "dead_users": u_row[6],
+                "banned_users": u_row[7],
+                "total_downloads": d_row[0],
+                "today_downloads": d_row[1],
+                "yesterday_downloads": d_row[2],
+                "week_downloads": d_row[3],
+                "cache_hits": d_row[4],
                 "platform_stats": platform_stats,
             }
 
